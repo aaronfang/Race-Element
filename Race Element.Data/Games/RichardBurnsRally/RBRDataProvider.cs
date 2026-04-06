@@ -24,7 +24,6 @@ internal sealed class RBRDataProvider : AbstractSimDataProvider
 
     internal override int PollingRate() => 300;
 
-
     private uint _lastStep = uint.MinValue;
     private long _sameStepBuffer = 0;
     private const long _maxBufferCount = 100;
@@ -56,9 +55,9 @@ internal sealed class RBRDataProvider : AbstractSimDataProvider
         gameData.IsGamePaused = false;
         gameData.Name = Game.RichardBurnsRally.ToShortName();
 
-        // Physics - RBR Car.Speed is in m/s, convert to km/h
+        // Physics - RBR CarSpeed is in m/s, convert to km/h
         localCar.Physics.Location = new(data.CarPositionX, data.CarPositionY, data.CarPositionZ);
-        localCar.Physics.Velocity = data.CarSpeed;
+        localCar.Physics.Velocity = data.CarSpeed * 3.6f;
         localCar.Physics.Acceleration = new(-data.AccSway, data.AccHeave, data.AccSurge);
         localCar.Physics.Rotation = Quaternion.CreateFromYawPitchRoll(
             data.CarYaw * (MathF.PI / 180f),
@@ -83,22 +82,25 @@ internal sealed class RBRDataProvider : AbstractSimDataProvider
         localCar.Engine.WaterTemperature = data.EngineCoolantTemp - 273.15f;
         localCar.Engine.OilTemperature = data.EngineTemp - 273.15f;
 
-
         // SlipRatio - Use memory reading for accurate wheel speeds (based on Adaptive_Trigger_RBR.py)
+        // Ground speed uses sqrt of velocity components (matching Python: sqrt(x²+y²+z²))
+        float groundSpeedKmh = MathF.Sqrt(
+            data.VelSurge * data.VelSurge +
+            data.VelSway * data.VelSway +
+            data.VelHeave * data.VelHeave) * 3.6f;
+
         _memoryReader ??= new RBRMemoryReader();
         if (_memoryReader.TryReadWheelSpeeds(out WheelSpeeds wheelSpeeds))
         {
-            // Calculate real slip ratio using actual wheel speeds
-            // ground_speed is in km/h, wheel speeds are in km/h
-            float groundSpeedKmh = MathF.Sqrt(data.VelSurge * data.VelSurge + data.VelSway * data.VelSway + data.VelHeave * data.VelHeave) * 3.6f;
-
             if (groundSpeedKmh > 5.0f) // Only calculate when moving > 5 km/h
             {
-                // Slip ratio = ((wheel_speed / ground_speed) - 1) * 100
-                float flSlip = ((wheelSpeeds.FrontLeft / groundSpeedKmh) - 1.0f) * 100.0f;
-                float frSlip = ((wheelSpeeds.FrontRight / groundSpeedKmh) - 1.0f) * 100.0f;
-                float rlSlip = ((wheelSpeeds.RearLeft / groundSpeedKmh) - 1.0f) * 100.0f;
-                float rrSlip = ((wheelSpeeds.RearRight / groundSpeedKmh) - 1.0f) * 100.0f;
+                // Slip ratio = (wheel_speed_kmh / ground_speed_kmh) - 1
+                // Positive = wheel spinning faster than car (wheelspin/acceleration slip)
+                // Negative = wheel spinning slower than car (braking lockup)
+                float flSlip = (wheelSpeeds.FrontLeft / groundSpeedKmh) - 1.0f;
+                float frSlip = (wheelSpeeds.FrontRight / groundSpeedKmh) - 1.0f;
+                float rlSlip = (wheelSpeeds.RearLeft / groundSpeedKmh) - 1.0f;
+                float rrSlip = (wheelSpeeds.RearRight / groundSpeedKmh) - 1.0f;
 
                 localCar.Tyres.SlipRatio = [flSlip, frSlip, rlSlip, rrSlip];
             }
@@ -109,13 +111,7 @@ internal sealed class RBRDataProvider : AbstractSimDataProvider
         }
         else
         {
-            // Fallback: use input-based approximation if memory reading fails
-            float brake = data.ControlBrake;
-            float throttle = data.ControlThrottle;
-            float longAccG = data.AccSurge / 9.80665f;
-            float brakeSlip = brake * (0.7f + Math.Min(0.3f, Math.Abs(longAccG)));
-            float throttleSlip = throttle * (0.7f + Math.Min(0.3f, Math.Max(0, longAccG)));
-            localCar.Tyres.SlipRatio = [brakeSlip, brakeSlip, throttleSlip, throttleSlip];
+            localCar.Tyres.SlipRatio = [0, 0, 0, 0];
         }
     }
 
